@@ -1,4 +1,3 @@
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -13,6 +12,8 @@
 #include <string.h>
 
 #include <check.h>
+
+#include "helpers.h"
 
 START_TEST(test_basics)
 {
@@ -54,6 +55,7 @@ START_TEST(test_basics)
 
     uint8_t found = Assoc_get_close_entries(assoc, &close_entries);
     ck_assert_msg(found == 1, "get_close_entries(): expected %u, got %u", 1, found);
+    kill_Assoc(assoc);
 }
 END_TEST
 
@@ -129,17 +131,9 @@ START_TEST(test_fillup)
 
     ck_assert_msg(good == 8, "Entries found were not the closest ones. Only %u/8 were.", good);
     //printf("good: %u %u %u\n", good, a, ((uint32_t)current_time() - a));
+    kill_Assoc(assoc);
 }
 END_TEST
-
-#define DEFTESTCASE(NAME) \
-    TCase *tc_##NAME = tcase_create(#NAME); \
-    tcase_add_test(tc_##NAME, test_##NAME); \
-    suite_add_tcase(s, tc_##NAME);
-
-#define DEFTESTCASE_SLOW(NAME, TIMEOUT) \
-    DEFTESTCASE(NAME) \
-    tcase_set_timeout(tc_##NAME, TIMEOUT);
 
 Suite *Assoc_suite(void)
 {

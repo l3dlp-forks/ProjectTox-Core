@@ -14,6 +14,8 @@
 
 #include "../toxcore/util.h"
 
+#include "helpers.h"
+
 #if defined(_WIN32) || defined(__WIN32__) || defined (WIN32)
 #define c_sleep(x) Sleep(1*x)
 #else
@@ -89,7 +91,7 @@ START_TEST(test_basic)
     uint8_t r_req[2 + 1 + crypto_box_PUBLICKEYBYTES + crypto_box_MACBYTES];
     uint16_t size = 1 + crypto_box_PUBLICKEYBYTES + crypto_box_MACBYTES;
     size = htons(size);
-    ret = encrypt_data_fast(f_shared_key, f_nonce, r_req_p, 1 + crypto_box_PUBLICKEYBYTES, r_req + 2);
+    ret = encrypt_data_symmetric(f_shared_key, f_nonce, r_req_p, 1 + crypto_box_PUBLICKEYBYTES, r_req + 2);
     increment_nonce(f_nonce);
     memcpy(r_req, &size, 2);
     uint32_t i;
@@ -110,12 +112,13 @@ START_TEST(test_basic)
     memcpy(&size, packet_resp, 2);
     ck_assert_msg(ntohs(size) == 2 + crypto_box_PUBLICKEYBYTES + crypto_box_MACBYTES, "Wrong packet size.");
     uint8_t packet_resp_plain[4096];
-    ret = decrypt_data_fast(f_shared_key, f_nonce_r, packet_resp + 2, recv_data_len - 2, packet_resp_plain);
+    ret = decrypt_data_symmetric(f_shared_key, f_nonce_r, packet_resp + 2, recv_data_len - 2, packet_resp_plain);
     ck_assert_msg(ret != -1, "decryption failed");
     increment_nonce(f_nonce_r);
     ck_assert_msg(packet_resp_plain[0] == 1, "wrong packet id %u", packet_resp_plain[0]);
     ck_assert_msg(packet_resp_plain[1] == 0, "connection not refused %u", packet_resp_plain[1]);
     ck_assert_msg(memcmp(packet_resp_plain + 2, f_public_key, crypto_box_PUBLICKEYBYTES) == 0, "key in packet wrong");
+    kill_TCP_server(tcp_s);
 }
 END_TEST
 
@@ -173,13 +176,19 @@ struct sec_TCP_con *new_TCP_con(TCP_Server *tcp_s)
     return sec_c;
 }
 
+void kill_TCP_con(struct sec_TCP_con *con)
+{
+    kill_sock(con->sock);
+    free(con);
+}
+
 int write_packet_TCP_secure_connection(struct sec_TCP_con *con, uint8_t *data, uint16_t length)
 {
     uint8_t packet[sizeof(uint16_t) + length + crypto_box_MACBYTES];
 
     uint16_t c_length = htons(length + crypto_box_MACBYTES);
     memcpy(packet, &c_length, sizeof(uint16_t));
-    int len = encrypt_data_fast(con->shared_key, con->sent_nonce, data, length, packet + sizeof(uint16_t));
+    int len = encrypt_data_symmetric(con->shared_key, con->sent_nonce, data, length, packet + sizeof(uint16_t));
 
     if ((unsigned int)len != (sizeof(packet) - sizeof(uint16_t)))
         return -1;
@@ -194,7 +203,7 @@ int read_packet_sec_TCP(struct sec_TCP_con *con, uint8_t *data, uint16_t length)
 {
     int len;
     ck_assert_msg((len = recv(con->sock, data, length, 0)) == length, "wrong len %i\n", len);
-    ck_assert_msg((len = decrypt_data_fast(con->shared_key, con->recv_nonce, data + 2, length - 2, data)) != -1,
+    ck_assert_msg((len = decrypt_data_symmetric(con->shared_key, con->recv_nonce, data + 2, length - 2, data)) != -1,
                   "Decrypt failed");
     increment_nonce(con->recv_nonce);
     return len;
@@ -288,37 +297,49 @@ START_TEST(test_some)
     ck_assert_msg(len == sizeof(ping_packet), "wrong len %u", len);
     ck_assert_msg(data[0] == 5, "wrong packet id %u", data[0]);
     ck_assert_msg(memcmp(ping_packet + 1, data + 1, sizeof(uint64_t)) == 0, "wrong packet data");
+    kill_TCP_server(tcp_s);
+    kill_TCP_con(con1);
+    kill_TCP_con(con2);
+    kill_TCP_con(con3);
 }
 END_TEST
 
 static int response_callback_good;
 static uint8_t response_callback_connection_id;
 static uint8_t response_callback_public_key[crypto_box_PUBLICKEYBYTES];
-static int response_callback(void *object, uint8_t connection_id, uint8_t *public_key)
+static int response_callback(void *object, uint8_t connection_id, const uint8_t *public_key)
 {
-    if (object != (void *)1)
+    if (set_tcp_connection_number(object - 2, connection_id, 7) != 0)
         return 1;
 
     response_callback_connection_id = connection_id;
     memcpy(response_callback_public_key, public_key, crypto_box_PUBLICKEYBYTES);
     response_callback_good++;
+    return 0;
 }
 static int status_callback_good;
 static uint8_t status_callback_connection_id;
 static uint8_t status_callback_status;
-static int status_callback(void *object, uint8_t connection_id, uint8_t status)
+static int status_callback(void *object, uint32_t number, uint8_t connection_id, uint8_t status)
 {
     if (object != (void *)2)
+        return 1;
+
+    if (number != 7)
         return 1;
 
     status_callback_connection_id = connection_id;
     status_callback_status = status;
     status_callback_good++;
+    return 0;
 }
 static int data_callback_good;
-static int data_callback(void *object, uint8_t connection_id, uint8_t *data, uint16_t length)
+static int data_callback(void *object, uint32_t number, uint8_t connection_id, const uint8_t *data, uint16_t length)
 {
     if (object != (void *)3)
+        return 1;
+
+    if (number != 7)
         return 1;
 
     if (length != 5)
@@ -326,6 +347,27 @@ static int data_callback(void *object, uint8_t connection_id, uint8_t *data, uin
 
     if (data[0] == 1 && data[1] == 2 && data[2] == 3 && data[3] == 4 && data[4] == 5) {
         data_callback_good++;
+        return 0;
+    }
+
+    return 1;
+}
+
+static int oob_data_callback_good;
+static uint8_t oob_pubkey[crypto_box_PUBLICKEYBYTES];
+static int oob_data_callback(void *object, const uint8_t *public_key, const uint8_t *data, uint16_t length)
+{
+    if (object != (void *)4)
+        return 1;
+
+    if (length != 5)
+        return 1;
+
+    if (memcmp(public_key, oob_pubkey, crypto_box_PUBLICKEYBYTES) != 0)
+        return 1;
+
+    if (data[0] == 1 && data[1] == 2 && data[2] == 3 && data[3] == 4 && data[4] == 5) {
+        oob_data_callback_good++;
         return 0;
     }
 
@@ -350,7 +392,7 @@ START_TEST(test_client)
     ip_port_tcp_s.port = htons(ports[rand() % NUM_PORTS]);
     ip_port_tcp_s.ip.family = AF_INET6;
     ip_port_tcp_s.ip.ip6.in6_addr = in6addr_loopback;
-    TCP_Client_Connection *conn = new_TCP_connection(ip_port_tcp_s, self_public_key, f_public_key, f_secret_key);
+    TCP_Client_Connection *conn = new_TCP_connection(ip_port_tcp_s, self_public_key, f_public_key, f_secret_key, 0);
     c_sleep(50);
     do_TCP_connection(conn);
     ck_assert_msg(conn->status == TCP_CLIENT_UNCONFIRMED, "Wrong status. Expected: %u, is: %u", TCP_CLIENT_UNCONFIRMED,
@@ -377,11 +419,13 @@ START_TEST(test_client)
     uint8_t f2_public_key[crypto_box_PUBLICKEYBYTES];
     uint8_t f2_secret_key[crypto_box_SECRETKEYBYTES];
     crypto_box_keypair(f2_public_key, f2_secret_key);
-    TCP_Client_Connection *conn2 = new_TCP_connection(ip_port_tcp_s, self_public_key, f2_public_key, f2_secret_key);
-    routing_response_handler(conn, response_callback, (void *)1);
+    ip_port_tcp_s.port = htons(ports[rand() % NUM_PORTS]);
+    TCP_Client_Connection *conn2 = new_TCP_connection(ip_port_tcp_s, self_public_key, f2_public_key, f2_secret_key, 0);
+    routing_response_handler(conn, response_callback, ((void *)conn) + 2);
     routing_status_handler(conn, status_callback, (void *)2);
     routing_data_handler(conn, data_callback, (void *)3);
-    response_callback_good = status_callback_good = data_callback_good = 0;
+    oob_data_handler(conn, oob_data_callback, (void *)4);
+    oob_data_callback_good = response_callback_good = status_callback_good = data_callback_good = 0;
     c_sleep(50);
     do_TCP_connection(conn);
     do_TCP_connection(conn2);
@@ -391,6 +435,9 @@ START_TEST(test_client)
     do_TCP_connection(conn);
     do_TCP_connection(conn2);
     c_sleep(50);
+    uint8_t data[5] = {1, 2, 3, 4, 5};
+    memcpy(oob_pubkey, f2_public_key, crypto_box_PUBLICKEYBYTES);
+    send_oob_packet(conn2, f_public_key, data, 5);
     send_routing_request(conn, f2_public_key);
     send_routing_request(conn2, f_public_key);
     c_sleep(50);
@@ -398,6 +445,7 @@ START_TEST(test_client)
     c_sleep(50);
     do_TCP_connection(conn);
     do_TCP_connection(conn2);
+    ck_assert_msg(oob_data_callback_good == 1, "oob callback not called");
     ck_assert_msg(response_callback_good == 1, "response callback not called");
     ck_assert_msg(memcmp(response_callback_public_key, f2_public_key, crypto_box_PUBLICKEYBYTES) == 0, "wrong public key");
     ck_assert_msg(status_callback_good == 1, "status callback not called");
@@ -405,7 +453,6 @@ START_TEST(test_client)
     ck_assert_msg(status_callback_connection_id == response_callback_connection_id, "connection ids not equal");
     c_sleep(50);
     do_TCP_server(tcp_s);
-    uint8_t data[5] = {1, 2, 3, 4, 5};
     ck_assert_msg(send_data(conn2, 0, data, 5) == 1, "send data failed");
     c_sleep(50);
     do_TCP_server(tcp_s);
@@ -413,6 +460,18 @@ START_TEST(test_client)
     do_TCP_connection(conn);
     do_TCP_connection(conn2);
     ck_assert_msg(data_callback_good == 1, "data callback not called");
+    status_callback_good = 0;
+    send_disconnect_request(conn2, 0);
+    c_sleep(50);
+    do_TCP_server(tcp_s);
+    c_sleep(50);
+    do_TCP_connection(conn);
+    do_TCP_connection(conn2);
+    ck_assert_msg(status_callback_good == 1, "status callback not called");
+    ck_assert_msg(status_callback_status == 1, "wrong status");
+    kill_TCP_server(tcp_s);
+    kill_TCP_connection(conn);
+    kill_TCP_connection(conn2);
 }
 END_TEST
 
@@ -431,7 +490,7 @@ START_TEST(test_client_invalid)
     ip_port_tcp_s.port = htons(ports[rand() % NUM_PORTS]);
     ip_port_tcp_s.ip.family = AF_INET6;
     ip_port_tcp_s.ip.ip6.in6_addr = in6addr_loopback;
-    TCP_Client_Connection *conn = new_TCP_connection(ip_port_tcp_s, self_public_key, f_public_key, f_secret_key);
+    TCP_Client_Connection *conn = new_TCP_connection(ip_port_tcp_s, self_public_key, f_public_key, f_secret_key, 0);
     c_sleep(50);
     do_TCP_connection(conn);
     ck_assert_msg(conn->status == TCP_CLIENT_CONNECTING, "Wrong status. Expected: %u, is: %u", TCP_CLIENT_CONNECTING,
@@ -444,17 +503,11 @@ START_TEST(test_client_invalid)
     do_TCP_connection(conn);
     ck_assert_msg(conn->status == TCP_CLIENT_DISCONNECTED, "Wrong status. Expected: %u, is: %u", TCP_CLIENT_DISCONNECTED,
                   conn->status);
+
+    kill_TCP_connection(conn);
 }
 END_TEST
 
-#define DEFTESTCASE(NAME) \
-    TCase *tc_##NAME = tcase_create(#NAME); \
-    tcase_add_test(tc_##NAME, test_##NAME); \
-    suite_add_tcase(s, tc_##NAME);
-
-#define DEFTESTCASE_SLOW(NAME, TIMEOUT) \
-    DEFTESTCASE(NAME) \
-    tcase_set_timeout(tc_##NAME, TIMEOUT);
 Suite *TCP_suite(void)
 {
     Suite *s = suite_create("TCP");

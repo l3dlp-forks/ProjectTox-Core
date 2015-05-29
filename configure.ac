@@ -2,11 +2,11 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.65])
-AC_INIT([tox], [0.0.0], [http://tox.im])
+AC_INIT([tox], [0.0.0], [https://tox.im])
 AC_CONFIG_AUX_DIR(configure_aux)
 AC_CONFIG_SRCDIR([toxcore/net_crypto.c])
 AC_CONFIG_HEADERS([config.h])
-AM_INIT_AUTOMAKE([1.10 -Wall subdir-objects])
+AM_INIT_AUTOMAKE([1.10 -Wall subdir-objects tar-ustar])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 AC_CONFIG_MACRO_DIR([m4])
 
@@ -31,8 +31,10 @@ BUILD_DHT_BOOTSTRAP_DAEMON="no"
 BUILD_NTOX="no"
 BUILD_TESTS="yes"
 BUILD_AV="yes"
-BUILD_PHONE="no"
 BUILD_TESTING="yes"
+
+LOGGING="no"
+LOGGING_OUTNAM="libtoxcore.log"
 
 NCURSES_FOUND="no"
 LIBCONFIG_FOUND="no"
@@ -80,26 +82,66 @@ AC_ARG_ENABLE([randombytes-stir],
     ]
 )
 
-
-PKG_PROG_PKG_CONFIG
-
-AC_ARG_ENABLE([phone],
-    [AC_HELP_STRING([--enable-phone], [build test phone (default: auto)]) ],
+AC_ARG_ENABLE([log],
+    [AC_HELP_STRING([--enable-log], [enable logging (default: auto)]) ],
     [
-        if test "x$enableval" = "xno"; then
-            BUILD_PHONE="no"
-        elif test "x$enableval" = "xyes"; then
-            BUILD_PHONE="yes"
+        if test "x$enableval" = "xyes"; then
+            LOGGING="yes"
+            
+            AC_DEFINE([LOGGING], [], [If logging enabled])
+            AC_DEFINE([LOGGER_LEVEL], [LOG_DEBUG], [LOG_LEVEL value])
+            AC_DEFINE_UNQUOTED([LOGGER_OUTPUT_FILE], ["$LOGGING_OUTNAM"], [Output of logger])
         fi
     ]
 )
+
+AC_ARG_WITH(log-level,
+    AC_HELP_STRING([--with-log-level=LEVEL],
+                   [Logger levels: TRACE; DEBUG; INFO; WARNING; ERROR ]),
+    [
+        if test "x$LOGGING" = "xno"; then
+            AC_MSG_WARN([Logging disabled!])
+        else
+            if test "x$withval" = "xTRACE"; then
+                AC_DEFINE([LOGGER_LEVEL], [LOG_TRACE], [LOG_LEVEL value])
+            
+            elif test "x$withval" = "xDEBUG"; then
+                AC_DEFINE([LOGGER_LEVEL], [LOG_DEBUG], [LOG_LEVEL value])
+            
+            elif test "x$withval" = "xINFO"; then
+                AC_DEFINE([LOGGER_LEVEL], [LOG_INFO], [LOG_LEVEL value])
+            
+            elif test "x$withval" = "xWARNING"; then
+                AC_DEFINE([LOGGER_LEVEL], [LOG_WARNING], [LOG_LEVEL value])
+                
+            elif test "x$withval" = "xERROR"; then
+                AC_DEFINE([LOGGER_LEVEL], [LOG_ERROR], [LOG_LEVEL value])
+            else
+                AC_MSG_WARN([Invalid logger level: $withval. Using default 'DEBUG'])
+            fi
+        fi
+    ]
+)
+
+AC_ARG_WITH(log-path,
+    AC_HELP_STRING([--with-log-path=DIR],
+                   [Path of logger output]),
+    [
+        if test "x$LOGGING" = "xno"; then
+            AC_MSG_WARN([Logging disabled!])
+        else
+            AC_DEFINE_UNQUOTED([LOGGER_OUTPUT_FILE], ["$withval""/""$LOGGING_OUTNAM"], [Output of logger])
+        fi
+    ]
+)
+
+PKG_PROG_PKG_CONFIG
 
 AC_ARG_ENABLE([av],
     [AC_HELP_STRING([--disable-av], [build AV support libraries (default: auto)]) ],
     [
         if test "x$enableval" = "xno"; then
             BUILD_AV="no"
-            BUILD_PHONE="no"
         elif test "x$enableval" = "xyes"; then
             BUILD_AV="yes"
         fi
@@ -139,6 +181,17 @@ AC_ARG_ENABLE([daemon],
     ]
 )
 
+AC_ARG_ENABLE([rt],
+    [AC_HELP_STRING([--disable-rt], [Disables the librt check (default: auto)]) ],
+    [
+        if test "x$enableval" = "xno"; then
+            DISABLE_RT="yes"
+        elif test "x$enableval" = "xyes"; then
+            DISABLE_RT="no"
+        fi
+    ]
+)
+
 AC_ARG_ENABLE([testing],
     [AC_HELP_STRING([--disable-testing], [build various testing tools (default: auto)]) ],
     [
@@ -149,6 +202,25 @@ AC_ARG_ENABLE([testing],
         fi
     ]
 )
+
+AC_ARG_ENABLE([[epoll]],
+  [AS_HELP_STRING([[--enable-epoll[=ARG]]], [enable epoll support (yes, no, auto) [auto]])],
+    [enable_epoll=${enableval}],
+    [enable_epoll='auto']
+  )
+
+AX_HAVE_EPOLL
+if test "$enable_epoll" != "no"; then
+  if test "${ax_cv_have_epoll}" = "yes"; then
+    AC_DEFINE([TCP_SERVER_USE_EPOLL],[1],[define to 1 to enable epoll support])
+    enable_epoll='yes'
+  else
+    if test "$enable_epoll" = "yes"; then
+      AC_MSG_ERROR([[Support for epoll was explicitly requested but cannot be enabled on this platform.]])
+    fi
+    enable_epoll='no'
+  fi
+fi
 
 DEPSEARCH=
 LIBSODIUM_SEARCH_HEADERS=
@@ -221,6 +293,7 @@ AC_LIBTOOL_WIN32_DLL
 AC_PROG_LIBTOOL
 
 WIN32=no
+MACH=no
 AC_CANONICAL_HOST
 case $host_os in
     *mingw*)
@@ -230,16 +303,27 @@ case $host_os in
     *solaris*)
         LIBS="$LIBS -lssp -lsocket -lnsl"
     ;;
+    *qnx*)
+        LIBS="$LIBS -lsocket"
+    ;;
     *freebsd*|*openbsd*)
         LDFLAGS="$LDFLAGS -L/usr/local/lib"
         CFLAGS="$CFLAGS -I/usr/local/include"
         CPPFLAGS="$CPPFLAGS -I/usr/local/include"
         ADD_NACL_OBJECTS_TO_PKGCONFIG="no"
     ;;
+    darwin*)
+        MACH=yes
+    ;;
 esac
 AM_CONDITIONAL(WIN32, test "x$WIN32" = "xyes")
 
 AC_SUBST(EXTRA_LT_LDFLAGS)
+
+# Needed math flags for some compilers
+
+MATH_LDFLAGS="-lm"
+AC_SUBST(MATH_LDFLAGS)
 
 # Checks for libraries.
 
@@ -290,20 +374,20 @@ else
     LDFLAGS_SAVE="$LDFLAGS"
     if test -n "$LIBSODIUM_SEARCH_LIBS"; then
         LDFLAGS="-L$LIBSODIUM_SEARCH_LIBS $LDFLAGS"
-        AC_CHECK_LIB(sodium, randombytes_random,
+        AC_CHECK_LIB(sodium, crypto_pwhash_scryptsalsa208sha256,
             [
                 LIBSODIUM_LDFLAGS="-L$LIBSODIUM_SEARCH_LIBS"
                 LIBSODIUM_LIBS="-lsodium"
             ],
             [
-                AC_MSG_ERROR([required library libsodium was not found in requested location $LIBSODIUM_SEARCH_LIBS])
+                AC_MSG_ERROR([required library libsodium was not found in requested location $LIBSODIUM_SEARCH_LIBS or library version is too old])
             ]
         )
     else
-        AC_CHECK_LIB(sodium, randombytes_random,
+        AC_CHECK_LIB(sodium, crypto_pwhash_scryptsalsa208sha256,
             [],
             [
-                AC_MSG_ERROR([required library libsodium was not found on your system, please check http://download.libsodium.org/libsodium/releases/])
+                AC_MSG_ERROR([required library libsodium was not found on your system, please check http://download.libsodium.org/libsodium/releases/ or library version is too old])
             ]
         )
     fi
@@ -388,93 +472,32 @@ AC_C_BIGENDIAN
 # Checks for library functions.
 AC_FUNC_FORK
 AC_CHECK_FUNCS([gettimeofday memset socket strchr malloc])
-
-if test "x$BUILD_AV" = "xyes"; then
-    AX_PTHREAD(
-        [],
+if (test "x$WIN32" != "xyes") && (test "x$MACH" != "xyes") && (test "x${host_os#*openbsd}" == "x$host_os") && (test "x$DISABLE_RT" != "xyes"); then
+    AC_CHECK_LIB(rt, clock_gettime,
         [
-            AC_MSG_WARN([disabling AV support: required pthread library not found])
-            BUILD_AV="no"
-            BUILD_PHONE="no"
+            RT_LIBS="-lrt"
+            AC_SUBST(RT_LIBS)
+        ],
+        [
+            AC_MSG_ERROR([required library rt was not found on your system])
         ]
     )
 fi
 
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([AVFORMAT], [libavformat],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $AVFORMAT_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
 
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([AVCODEC], [libavcodec],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $AVCODEC_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
+AX_PTHREAD(
+    [],
+    [
+        AC_MSG_ERROR([required library pthread was not found on your system])
+    ]
+)
 
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([AVUTIL], [libavutil],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $AVUTIL_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
-
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([AVDEVICE], [libavdevice],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $AVDEVICE_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
-
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([SWSCALE], [libswscale],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $SWSCALE_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
-
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([SDL], [sdl],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $SDL_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
-
-if test "x$BUILD_PHONE" = "xyes"; then
-    PKG_CHECK_MODULES([OPENAL], [openal],
-        [],
-        [
-            AC_MSG_WARN([disabling phone $OPENAL_PKG_ERRORS])
-            BUILD_PHONE="no"
-        ]
-    )
-fi
-
-#If all dependencies are here add support video define for phone.c
-if test "x$BUILD_PHONE" == "xyes"; then
-    #Set FFMpeg define
-    AC_DEFINE([TOX_FFMPEG], [1], [Support video])
-fi
+AC_CHECK_LIB([pthread], [pthread_self],
+    [
+        PTHREAD_LDFLAGS="-lpthread"
+        AC_SUBST(PTHREAD_LDFLAGS)
+    ]
+)
 
 if test "x$BUILD_AV" = "xyes"; then
     PKG_CHECK_MODULES([OPUS], [opus],
@@ -482,7 +505,6 @@ if test "x$BUILD_AV" = "xyes"; then
         [
             AC_MSG_WARN([disabling AV support $OPUS_PKG_ERRORS])
             BUILD_AV="no"
-            BUILD_PHONE="no"
         ]
     )
 fi
@@ -493,7 +515,6 @@ if test "x$BUILD_AV" = "xyes"; then
         [
             AC_MSG_WARN([disabling AV support $VPX_PKG_ERRORS])
             BUILD_AV="no"
-            BUILD_PHONE="no"
         ]
     )
 fi
@@ -501,8 +522,7 @@ fi
 if test "x$BUILD_AV" = "xyes"; then
     # toxcore lib needs an global?
     # So far this works okay
-    ## What about pthread?
-    AV_LIBS="$OPUS_LIBS $VPX_LIBS -pthread"
+    AV_LIBS="$OPUS_LIBS $VPX_LIBS"
     AC_SUBST(AV_LIBS)
 
     AV_CFLAGS="$OPUS_CFLAGS $VPX_CFLAGS"
@@ -654,7 +674,7 @@ fi
 if test "x$WIN32" = "xyes"; then
     AC_CHECK_LIB(ws2_32, main,
         [
-            WINSOCK2_LIBS="-lws2_32"
+            WINSOCK2_LIBS="-liphlpapi -lws2_32"
             AC_SUBST(WINSOCK2_LIBS)
         ],
         [
@@ -667,13 +687,13 @@ AM_CONDITIONAL(BUILD_DHT_BOOTSTRAP_DAEMON, test "x$BUILD_DHT_BOOTSTRAP_DAEMON" =
 AM_CONDITIONAL(BUILD_TESTS, test "x$BUILD_TESTS" = "xyes")
 AM_CONDITIONAL(BUILD_NTOX, test "x$BUILD_NTOX" = "xyes")
 AM_CONDITIONAL(BUILD_AV, test "x$BUILD_AV" = "xyes")
-AM_CONDITIONAL(BUILD_PHONE, test "x$BUILD_PHONE" = "xyes")
 AM_CONDITIONAL(BUILD_TESTING, test "x$BUILD_TESTING" = "xyes")
 AM_CONDITIONAL(WIN32, test "x$WIN32" = "xyes")
 
 AC_CONFIG_FILES([Makefile
                  build/Makefile
                  libtoxcore.pc
+                 tox.spec
                 ])
 
 AM_COND_IF(BUILD_AV,

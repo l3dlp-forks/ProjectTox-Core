@@ -52,18 +52,6 @@ typedef unsigned int sock_t;
 /* sa_family_t is the sockaddr_in / sockaddr_in6 family field */
 typedef short sa_family_t;
 
-#ifndef IN6_ARE_ADDR_EQUAL
-#ifdef IN6_ADDR_EQUAL
-#define IN6_ARE_ADDR_EQUAL(a,b) IN6_ADDR_EQUAL(a,b)
-#else
-#define IN6_ARE_ADDR_EQUAL(a,b) \
-   ((((__const uint32_t *) (a))[0] == ((__const uint32_t *) (b))[0]) \
-   && (((__const uint32_t *) (a))[1] == ((__const uint32_t *) (b))[1]) \
-   && (((__const uint32_t *) (a))[2] == ((__const uint32_t *) (b))[2]) \
-   && (((__const uint32_t *) (a))[3] == ((__const uint32_t *) (b))[3]))
-#endif
-#endif
-
 #ifndef EWOULDBLOCK
 #define EWOULDBLOCK WSAEWOULDBLOCK
 #endif
@@ -89,27 +77,12 @@ typedef int sock_t;
 #endif
 
 #if defined(__sun__)
-#define __EXTENSIONS__ 1 // SunOS! 
+#define __EXTENSIONS__ 1 // SunOS!
 #if defined(__SunOS5_6__) || defined(__SunOS5_7__) || defined(__SunOS5_8__) || defined(__SunOS5_9__) || defined(__SunOS5_10__)
 //Nothing needed
 #else
 #define __MAKECONTEXT_V2_SOURCE 1
 #endif
-#endif
-
-#ifndef VANILLA_NACL
-/* We use libsodium by default. */
-#include <sodium.h>
-#else
-#include <crypto_box.h>
-#include <crypto_secretbox.h>
-#include <randombytes.h>
-#include <crypto_hash_sha256.h>
-#define crypto_box_MACBYTES (crypto_box_ZEROBYTES - crypto_box_BOXZEROBYTES)
-#endif
-
-#ifndef crypto_secretbox_MACBYTES
-#define crypto_secretbox_MACBYTES (crypto_secretbox_ZEROBYTES - crypto_secretbox_BOXZEROBYTES)
 #endif
 
 #ifndef IPV6_ADD_MEMBERSHIP
@@ -119,25 +92,18 @@ typedef int sock_t;
 #endif
 #endif
 
-#define MAX_UDP_PACKET_SIZE 65507
+#define MAX_UDP_PACKET_SIZE 2048
 
 #define NET_PACKET_PING_REQUEST    0   /* Ping request packet ID. */
 #define NET_PACKET_PING_RESPONSE   1   /* Ping response packet ID. */
 #define NET_PACKET_GET_NODES       2   /* Get nodes request packet ID. */
-#define NET_PACKET_SEND_NODES      3   /* Send nodes response packet ID for IPv4 addresses. */
 #define NET_PACKET_SEND_NODES_IPV6 4   /* Send nodes response packet ID for other addresses. */
-#define NET_PACKET_HANDSHAKE       16  /* Handshake packet ID. */
-#define NET_PACKET_SYNC            17  /* SYNC packet ID. */
-#define NET_PACKET_DATA            18  /* Data packet ID. */
+#define NET_PACKET_COOKIE_REQUEST  24  /* Cookie request packet */
+#define NET_PACKET_COOKIE_RESPONSE 25  /* Cookie response packet */
+#define NET_PACKET_CRYPTO_HS       26  /* Crypto handshake packet */
+#define NET_PACKET_CRYPTO_DATA     27  /* Crypto data packet */
 #define NET_PACKET_CRYPTO          32  /* Encrypted data packet ID. */
 #define NET_PACKET_LAN_DISCOVERY   33  /* LAN discovery packet ID. */
-#define NET_PACKET_GROUP_CHATS     48  /* Group chats packet ID. */
-
-/* Range of ids that custom user packets can use. */
-#define NET_PACKET_CUSTOM_RANGE_START 64
-#define NET_PACKET_CUSTOM_RANGE_END 96
-
-#define TOTAL_USERPACKETS (NET_PACKET_CUSTOM_RANGE_END - NET_PACKET_CUSTOM_RANGE_START)
 
 /* See:  docs/Prevent_Tracking.txt and onion.{c, h} */
 #define NET_PACKET_ONION_SEND_INITIAL 128
@@ -161,11 +127,13 @@ typedef int sock_t;
 #define TOX_PORTRANGE_TO   33545
 #define TOX_PORT_DEFAULT   TOX_PORTRANGE_FROM
 
+/* TCP related */
+#define TCP_ONION_FAMILY (AF_INET6 + 1)
+#define TCP_INET (AF_INET6 + 2)
+#define TCP_INET6 (AF_INET6 + 3)
+#define TCP_FAMILY (AF_INET6 + 4)
 
-/* TODO: remove padding bytes next time we need to break compatibility with old versions of core. */
-
-typedef union __attribute__ ((__packed__))
-{
+typedef union {
     uint8_t uint8[4];
     uint16_t uint16[2];
     uint32_t uint32;
@@ -173,8 +141,7 @@ typedef union __attribute__ ((__packed__))
 }
 IP4;
 
-typedef union __attribute__ ((__packed__))
-{
+typedef union {
     uint8_t uint8[16];
     uint16_t uint16[8];
     uint32_t uint32[4];
@@ -183,11 +150,8 @@ typedef union __attribute__ ((__packed__))
 }
 IP6;
 
-typedef struct __attribute__ ((__packed__))
-{
+typedef struct {
     uint8_t family;
-    /* Not used for anything right now. */
-    uint8_t padding[3];
     union {
         IP4 ip4;
         IP6 ip6;
@@ -195,31 +159,63 @@ typedef struct __attribute__ ((__packed__))
 }
 IP;
 
-typedef union __attribute__ ((__packed__))
-{
-    struct {
-        IP4 ip;
-        uint16_t port;
-        /* Not used for anything right now. */
-        uint16_t padding;
-    };
-    uint8_t uint8[8];
-}
-IP4_Port;
-
-typedef struct __attribute__ ((__packed__)) IP_Port {
+typedef struct {
     IP ip;
     uint16_t port;
-    uint16_t padding;
-} IP_Port;
+}
+IP_Port;
+
+/* Does the IP6 struct a contain an IPv4 address in an IPv6 one? */
+#define IPV6_IPV4_IN_V6(a) ((a.uint64[0] == 0) && (a.uint32[2] == htonl (0xffff)))
+
+#define SIZE_IP4 4
+#define SIZE_IP6 16
+#define SIZE_IP (1 + SIZE_IP6)
+#define SIZE_PORT 2
+#define SIZE_IPPORT (SIZE_IP + SIZE_PORT)
 
 #define TOX_ENABLE_IPV6_DEFAULT 1
 
 /* ip_ntoa
  *   converts ip into a string
  *   uses a static buffer, so mustn't used multiple times in the same output
+ *
+ *   IPv6 addresses are enclosed into square brackets, i.e. "[IPv6]"
+ *   writes error message into the buffer on error
  */
-const char *ip_ntoa(IP *ip);
+const char *ip_ntoa(const IP *ip);
+
+/*
+ * ip_parse_addr
+ *  parses IP structure into an address string
+ *
+ * input
+ *  ip: ip of AF_INET or AF_INET6 families
+ *  length: length of the address buffer
+ *          Must be at least INET_ADDRSTRLEN for AF_INET
+ *          and INET6_ADDRSTRLEN for AF_INET6
+ *
+ * output
+ *  address: dotted notation (IPv4: quad, IPv6: 16) or colon notation (IPv6)
+ *
+ * returns 1 on success, 0 on failure
+ */
+int ip_parse_addr(const IP *ip, char *address, size_t length);
+
+/*
+ * addr_parse_ip
+ *  directly parses the input into an IP structure
+ *  tries IPv4 first, then IPv6
+ *
+ * input
+ *  address: dotted notation (IPv4: quad, IPv6: 16) or colon notation (IPv6)
+ *
+ * output
+ *  IP: family and the value is set on success
+ *
+ * returns 1 on success, 0 on failure
+ */
+int addr_parse_ip(const char *address, IP *to);
 
 /* ip_equal
  *  compares two IPAny structures
@@ -227,7 +223,7 @@ const char *ip_ntoa(IP *ip);
  *
  * returns 0 when not equal or when uninitialized
  */
-int ip_equal(IP *a, IP *b);
+int ip_equal(const IP *a, const IP *b);
 
 /* ipport_equal
  *  compares two IPAny_Port structures
@@ -235,20 +231,20 @@ int ip_equal(IP *a, IP *b);
  *
  * returns 0 when not equal or when uninitialized
  */
-int ipport_equal(IP_Port *a, IP_Port *b);
+int ipport_equal(const IP_Port *a, const IP_Port *b);
 
 /* nulls out ip */
 void ip_reset(IP *ip);
 /* nulls out ip, sets family according to flag */
 void ip_init(IP *ip, uint8_t ipv6enabled);
 /* checks if ip is valid */
-int ip_isset(IP *ip);
+int ip_isset(const IP *ip);
 /* checks if ip is valid */
-int ipport_isset(IP_Port *ipport);
+int ipport_isset(const IP_Port *ipport);
 /* copies an ip structure */
-void ip_copy(IP *target, IP *source);
+void ip_copy(IP *target, const IP *source);
 /* copies an ip_port structure */
-void ipport_copy(IP_Port *target, IP_Port *source);
+void ipport_copy(IP_Port *target, const IP_Port *source);
 
 /*
  * addr_resolve():
@@ -290,7 +286,7 @@ int addr_resolve_or_parse_ip(const char *address, IP *to, IP *extra);
  * Packet data is put into data.
  * Packet length is put into length.
  */
-typedef int (*packet_handler_callback)(void *object, IP_Port ip_port, uint8_t *data, uint32_t len);
+typedef int (*packet_handler_callback)(void *object, IP_Port ip_port, const uint8_t *data, uint16_t len);
 
 typedef struct {
     packet_handler_callback function;
@@ -304,7 +300,6 @@ typedef struct {
     uint16_t port;
     /* Our UDP socket. */
     sock_t sock;
-    uint64_t send_fail_eagain;
 } Networking_Core;
 
 /* Run this before creating sockets.
@@ -339,6 +334,13 @@ int set_socket_nonblock(sock_t sock);
  */
 int set_socket_nosigpipe(sock_t sock);
 
+/* Enable SO_REUSEADDR on socket.
+ *
+ * return 1 on success
+ * return 0 on failure
+ */
+int set_socket_reuseaddr(sock_t sock);
+
 /* Set socket to dual (IPv4 + IPv6 socket)
  *
  * return 1 on success
@@ -346,18 +348,13 @@ int set_socket_nosigpipe(sock_t sock);
  */
 int set_socket_dualstack(sock_t sock);
 
-/*  return current time in milleseconds since the epoch. */
-uint64_t current_time(void);
-
-/*  return a random number.
- */
-uint32_t random_int(void);
-uint64_t random_64b(void);
+/* return current monotonic time in milliseconds (ms). */
+uint64_t current_time_monotonic(void);
 
 /* Basic network functions: */
 
 /* Function to send packet(data) of length length to ip_port. */
-int sendpacket(Networking_Core *net, IP_Port ip_port, uint8_t *data, uint32_t length);
+int sendpacket(Networking_Core *net, IP_Port ip_port, const uint8_t *data, uint16_t length);
 
 /* Function to call when packet beginning with byte is received. */
 void networking_registerhandler(Networking_Core *net, uint8_t byte, packet_handler_callback cb, void *object);
@@ -365,23 +362,18 @@ void networking_registerhandler(Networking_Core *net, uint8_t byte, packet_handl
 /* Call this several times a second. */
 void networking_poll(Networking_Core *net);
 
-/*
- * functions to avoid excessive polling
- */
-size_t networking_wait_data_size();
-int networking_wait_prepare(Networking_Core *net, uint32_t sendqueue_length, uint8_t *data);
-int networking_wait_execute(uint8_t *data, long seconds, long microseconds);
-int networking_wait_cleanup(Networking_Core *net, uint8_t *data);
-
 /* Initialize networking.
  * bind to ip and port.
  * ip must be in network order EX: 127.0.0.1 = (7F000001).
  * port is in host byte order (this means don't worry about it).
  *
- *  return 0 if no problems.
- *  return -1 if there were problems.
+ * return Networking_Core object if no problems
+ * return NULL if there are problems.
+ *
+ * If error is non NULL it is set to 0 if no issues, 1 if socket related error, 2 if other.
  */
 Networking_Core *new_networking(IP ip, uint16_t port);
+Networking_Core *new_networking_ex(IP ip, uint16_t port_from, uint16_t port_to, unsigned int *error);
 
 /* Function to cleanup networking stuff (doesn't do much right now). */
 void kill_networking(Networking_Core *net);

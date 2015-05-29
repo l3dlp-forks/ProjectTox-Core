@@ -28,13 +28,6 @@
 
 #include "DHT.h"
 
-/* Used for get_broadcast(). */
-#ifdef __linux
-#include <sys/ioctl.h>
-#include <arpa/inet.h>
-#include <linux/netdevice.h>
-#endif
-
 /* Interval in seconds between LAN discovery packet sending. */
 #define LAN_DISCOVERY_INTERVAL 10
 
@@ -43,6 +36,12 @@ int send_LANdiscovery(uint16_t port, DHT *dht);
 
 /* Sets up packet handlers. */
 void LANdiscovery_init(DHT *dht);
+
+/* Clear packet handlers. */
+void LANdiscovery_kill(DHT *dht);
+
+/* Is IP a local ip or not. */
+_Bool Local_ip(IP ip);
 
 /* checks if a given IP isn't routable
  *

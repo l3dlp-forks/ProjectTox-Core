@@ -16,11 +16,12 @@
 
 #include "../testing/misc_tools.c" // hex_string_to_bin
 #include "../toxcore/Messenger.h"
-#include "../toxcore/Lossless_UDP.h"
 #include <sys/types.h>
 #include <stdint.h>
 #include <string.h>
 #include <check.h>
+
+#include "helpers.h"
 
 #define REALLY_BIG_NUMBER ((1) << (sizeof(uint16_t) * 7))
 #define STRINGS_EQUAL(X, Y) (strcmp(X, Y) == 0)
@@ -46,13 +47,13 @@ START_TEST(test_m_sendmesage)
 {
     char *message = "h-hi :3";
     int good_len = strlen(message);
-    int bad_len = MAX_DATA_SIZE;
+    int bad_len = MAX_CRYPTO_PACKET_SIZE;
 
 
-    ck_assert(m_sendmessage(m, -1, (uint8_t *)message, good_len) == 0);
-    ck_assert(m_sendmessage(m, REALLY_BIG_NUMBER, (uint8_t *)message, good_len) == 0);
-    ck_assert(m_sendmessage(m, 17, (uint8_t *)message, good_len) == 0);
-    ck_assert(m_sendmessage(m, friend_id_num, (uint8_t *)message, bad_len) == 0);
+    ck_assert(m_send_message_generic(m, -1, MESSAGE_NORMAL, (uint8_t *)message, good_len, 0) == -1);
+    ck_assert(m_send_message_generic(m, REALLY_BIG_NUMBER, MESSAGE_NORMAL, (uint8_t *)message, good_len, 0) == -1);
+    ck_assert(m_send_message_generic(m, 17, MESSAGE_NORMAL, (uint8_t *)message, good_len, 0) == -1);
+    ck_assert(m_send_message_generic(m, friend_id_num, MESSAGE_NORMAL, (uint8_t *)message, bad_len, 0) == -2);
 }
 END_TEST
 
@@ -67,10 +68,10 @@ START_TEST(test_m_get_userstatus_size)
     rc = m_get_statusmessage_size(m, friend_id_num);
 
     /* this WILL error if the original m_addfriend_norequest() failed */
-    ck_assert_msg((rc > 0 && rc <= MAX_STATUSMESSAGE_LENGTH),
-                  "m_get_statusmessage_size is returning out of range values!\n"
+    ck_assert_msg((rc >= 0 && rc <= MAX_STATUSMESSAGE_LENGTH),
+                  "m_get_statusmessage_size is returning out of range values! (%i)\n"
                   "(this can be caused by the error of m_addfriend_norequest"
-                  " in the beginning of the suite)\n");
+                  " in the beginning of the suite)\n", rc);
 }
 END_TEST
 
@@ -127,7 +128,7 @@ START_TEST(test_m_addfriend)
 
     int good_len = strlen(good_data);
     int bad_len = strlen(bad_data);
-    int really_bad_len = (MAX_DATA_SIZE - crypto_box_PUBLICKEYBYTES
+    int really_bad_len = (MAX_CRYPTO_PACKET_SIZE - crypto_box_PUBLICKEYBYTES
                      - crypto_box_NONCEBYTES - crypto_box_BOXZEROBYTES
                                       + crypto_box_ZEROBYTES + 100); */
 /* TODO: Update this properly to latest master
@@ -299,39 +300,12 @@ START_TEST(test_messenger_state_saveloadsave)
 }
 END_TEST
 
-START_TEST(test_messenger_state_saveload_encrypted)
-{
-    uint8_t addr[FRIEND_ADDRESS_SIZE];
-    getaddress(m, addr);
-    Messenger *m_temp = new_messenger(TOX_ENABLE_IPV6_DEFAULT);
-
-    size_t size = messenger_size_encrypted(m);
-    uint8_t buffer[size];
-    messenger_save_encrypted(m, buffer, "Gentoo", sizeof("Gentoo"));
-
-    ck_assert_msg(messenger_load_encrypted(m_temp, buffer, size, "Ubuntu", sizeof("Ubuntu")) == -1,
-                  "Bad password didn't make the function fail.");
-    ck_assert_msg(messenger_load_encrypted(m_temp, buffer, size, "Gentoo", sizeof("Gentoo")) == 0,
-                  "Good password didn't make the function succeed.");
-    uint8_t addr1[FRIEND_ADDRESS_SIZE];
-    getaddress(m_temp, addr1);
-    ck_assert_msg(memcmp(addr1, addr, FRIEND_ADDRESS_SIZE) == 0, "Didn't load messenger successfully");
-    kill_messenger(m_temp);
-}
-END_TEST
-
-#define DEFTESTCASE(NAME) \
-    TCase *tc_##NAME = tcase_create(#NAME); \
-    tcase_add_test(tc_##NAME, test_##NAME); \
-    suite_add_tcase(s, tc_##NAME);
-
 Suite *messenger_suite(void)
 {
     Suite *s = suite_create("Messenger");
 
     DEFTESTCASE(dht_state_saveloadsave);
     DEFTESTCASE(messenger_state_saveloadsave);
-    DEFTESTCASE(messenger_state_saveload_encrypted);
 
     DEFTESTCASE(getself_name);
     DEFTESTCASE(m_get_userstatus_size);
@@ -361,7 +335,9 @@ int main(int argc, char *argv[])
     bad_id    = hex_string_to_bin(bad_id_str);
 
     /* IPv6 status from global define */
-    m = new_messenger(TOX_ENABLE_IPV6_DEFAULT);
+    Messenger_Options options = {0};
+    options.ipv6enabled = TOX_ENABLE_IPV6_DEFAULT;
+    m = new_messenger(&options, 0);
 
     /* setup a default friend and friendnum */
     if (m_addfriend_norequest(m, (uint8_t *)friend_id) < 0)

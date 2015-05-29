@@ -28,12 +28,78 @@
 #include "LAN_discovery.h"
 #include "util.h"
 
+/* Used for get_broadcast(). */
+#ifdef __linux
+#include <sys/ioctl.h>
+#include <arpa/inet.h>
+#include <linux/netdevice.h>
+#endif
+
 #define MAX_INTERFACES 16
 
-#ifdef __linux
 
 static int     broadcast_count = -1;
 static IP_Port broadcast_ip_port[MAX_INTERFACES];
+
+#if defined(_WIN32) || defined(__WIN32__) || defined (WIN32)
+
+#include <iphlpapi.h>
+
+static void fetch_broadcast_info(uint16_t port)
+{
+    broadcast_count = 0;
+
+    IP_ADAPTER_INFO *pAdapterInfo = malloc(sizeof(pAdapterInfo));
+    unsigned long ulOutBufLen = sizeof(pAdapterInfo);
+
+    if (pAdapterInfo == NULL) {
+        return;
+    }
+
+    if (GetAdaptersInfo(pAdapterInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW) {
+        free(pAdapterInfo);
+        pAdapterInfo = malloc(ulOutBufLen);
+
+        if (pAdapterInfo == NULL) {
+            return;
+        }
+    }
+
+    int ret;
+
+    if ((ret = GetAdaptersInfo(pAdapterInfo, &ulOutBufLen)) == NO_ERROR) {
+        IP_ADAPTER_INFO *pAdapter = pAdapterInfo;
+
+        while (pAdapter) {
+            IP gateway = {0}, subnet_mask = {0};
+
+            if (addr_parse_ip(pAdapter->IpAddressList.IpMask.String, &subnet_mask)
+                    && addr_parse_ip(pAdapter->GatewayList.IpAddress.String, &gateway)) {
+                if (gateway.family == AF_INET && subnet_mask.family == AF_INET) {
+                    IP_Port *ip_port = &broadcast_ip_port[broadcast_count];
+                    ip_port->ip.family = AF_INET;
+                    uint32_t gateway_ip = ntohl(gateway.ip4.uint32), subnet_ip = ntohl(subnet_mask.ip4.uint32);
+                    uint32_t broadcast_ip = gateway_ip + ~subnet_ip - 1;
+                    ip_port->ip.ip4.uint32 = htonl(broadcast_ip);
+                    ip_port->port = port;
+                    broadcast_count++;
+
+                    if (broadcast_count >= MAX_INTERFACES) {
+                        return;
+                    }
+                }
+            }
+
+            pAdapter = pAdapter->Next;
+        }
+    }
+
+    if (pAdapterInfo) {
+        free(pAdapterInfo);
+    }
+}
+
+#elif defined(__linux__)
 
 static void fetch_broadcast_info(uint16_t port)
 {
@@ -78,12 +144,19 @@ static void fetch_broadcast_info(uint16_t port)
 
         struct sockaddr_in *sock4 = (struct sockaddr_in *)&i_faces[i].ifr_broadaddr;
 
-        if (broadcast_count >= MAX_INTERFACES)
+        if (broadcast_count >= MAX_INTERFACES) {
+            close(sock);
             return;
+        }
 
         IP_Port *ip_port = &broadcast_ip_port[broadcast_count];
         ip_port->ip.family = AF_INET;
         ip_port->ip.ip4.in_addr = sock4->sin_addr;
+
+        if (ip_port->ip.ip4.uint32 == 0) {
+            continue;
+        }
+
         ip_port->port = port;
         broadcast_count++;
     }
@@ -91,12 +164,20 @@ static void fetch_broadcast_info(uint16_t port)
     close(sock);
 }
 
+#else //TODO: Other platforms?
+
+static void fetch_broadcast_info(uint16_t port)
+{
+    broadcast_count = 0;
+}
+
+#endif
 /* Send packet to all IPv4 broadcast addresses
  *
  *  return 1 if sent to at least one broadcast target.
  *  return 0 on failure to find any valid broadcast target.
  */
-static uint32_t send_broadcasts(Networking_Core *net, uint16_t port, uint8_t *data, uint16_t length)
+static uint32_t send_broadcasts(Networking_Core *net, uint16_t port, const uint8_t *data, uint16_t length)
 {
     /* fetch only once? on every packet? every X seconds?
      * old: every packet, new: once */
@@ -113,7 +194,6 @@ static uint32_t send_broadcasts(Networking_Core *net, uint16_t port, uint8_t *da
 
     return 1;
 }
-#endif /* __linux */
 
 /* Return the broadcast ip. */
 static IP broadcast_ip(sa_family_t family_socket, sa_family_t family_broadcast)
@@ -147,17 +227,42 @@ static IP broadcast_ip(sa_family_t family_socket, sa_family_t family_broadcast)
     return ip;
 }
 
-/*  return 0 if ip is a LAN ip.
- *  return -1 if it is not.
- */
-int LAN_ip(IP ip)
+/* Is IP a local ip or not. */
+_Bool Local_ip(IP ip)
 {
     if (ip.family == AF_INET) {
         IP4 ip4 = ip.ip4;
 
         /* Loopback. */
         if (ip4.uint8[0] == 127)
-            return 0;
+            return 1;
+    } else {
+        /* embedded IPv4-in-IPv6 */
+        if (IPV6_IPV4_IN_V6(ip.ip6)) {
+            IP ip4;
+            ip4.family = AF_INET;
+            ip4.ip4.uint32 = ip.ip6.uint32[3];
+            return Local_ip(ip4);
+        }
+
+        /* localhost in IPv6 (::1) */
+        if (ip.ip6.uint64[0] == 0 && ip.ip6.uint32[2] == 0 && ip.ip6.uint32[3] == htonl(1))
+            return 1;
+    }
+
+    return 0;
+}
+
+/*  return 0 if ip is a LAN ip.
+ *  return -1 if it is not.
+ */
+int LAN_ip(IP ip)
+{
+    if (Local_ip(ip))
+        return 0;
+
+    if (ip.family == AF_INET) {
+        IP4 ip4 = ip.ip4;
 
         /* 10.0.0.0 to 10.255.255.255 range. */
         if (ip4.uint8[0] == 10)
@@ -190,22 +295,18 @@ int LAN_ip(IP ip)
             return 0;
 
         /* embedded IPv4-in-IPv6 */
-        if (IN6_IS_ADDR_V4MAPPED(&ip.ip6.in6_addr)) {
+        if (IPV6_IPV4_IN_V6(ip.ip6)) {
             IP ip4;
             ip4.family = AF_INET;
             ip4.ip4.uint32 = ip.ip6.uint32[3];
             return LAN_ip(ip4);
         }
-
-        /* localhost in IPv6 (::1) */
-        if (IN6_IS_ADDR_LOOPBACK(&ip.ip6.in6_addr))
-            return 0;
     }
 
     return -1;
 }
 
-static int handle_LANdiscovery(void *object, IP_Port source, uint8_t *packet, uint32_t length)
+static int handle_LANdiscovery(void *object, IP_Port source, const uint8_t *packet, uint16_t length)
 {
     DHT *dht = object;
 
@@ -226,9 +327,8 @@ int send_LANdiscovery(uint16_t port, DHT *dht)
     data[0] = NET_PACKET_LAN_DISCOVERY;
     id_copy(data + 1, dht->self_public_key);
 
-#ifdef __linux
     send_broadcasts(dht->net, port, data, 1 + crypto_box_PUBLICKEYBYTES);
-#endif
+
     int res = -1;
     IP_Port ip_port;
     ip_port.port = port;
@@ -256,4 +356,9 @@ int send_LANdiscovery(uint16_t port, DHT *dht)
 void LANdiscovery_init(DHT *dht)
 {
     networking_registerhandler(dht->net, NET_PACKET_LAN_DISCOVERY, &handle_LANdiscovery, dht);
+}
+
+void LANdiscovery_kill(DHT *dht)
+{
+    networking_registerhandler(dht->net, NET_PACKET_LAN_DISCOVERY, NULL, NULL);
 }
